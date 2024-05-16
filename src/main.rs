@@ -1,7 +1,7 @@
 use std::{borrow::Cow, env};
 
 use librespot::{
-    core::{authentication::Credentials, config::SessionConfig, session::Session},
+    core::{authentication::Credentials, config::SessionConfig, http::Method, session::Session},
     protocol::tts_resolve::{
         resolve_request::{AudioFormat, Prompt, TtsProvider, TtsVoice},
         ResolveRequest,
@@ -39,7 +39,7 @@ async fn spotifydj(
         // are VOICE1 to VOICE40 as of Spotify 1.2.22.982.g794acc0a (macOS).
         tts_voice: TtsVoice::VOICE1.into(),
         sample_rate_hz: 44100,
-        prompt: Prompt::Ssml(formatted_prompt.clone().into()).into(),
+        prompt: Prompt::Ssml(formatted_prompt.clone()).into(),
 
         // Language is oddly not specified by the official client.
         ..Default::default()
@@ -50,13 +50,12 @@ async fn spotifydj(
     // but request_with_protobuf overwrites it to "application/x-protobuf".
     //
     // Thankfully, this does not appear to be validated :)
-
     let raw_response = ctx
         .data()
         .session
         .spclient()
         .request_with_protobuf(
-            &http::Method::POST,
+            &Method::POST,
             "/client-tts/v1/fulfill",
             None,
             &narration_request,
@@ -64,20 +63,19 @@ async fn spotifydj(
         .await
         .expect("failed requesting TTS from Spotify");
 
-    let owned_contents = Cow::Owned(raw_response.to_vec());
-    ctx.send(|f| {
-        f.content(format!(
+    let mp3_bytes = Cow::Owned(raw_response.to_vec());
+    let mp3_attachment = serenity::CreateAttachment::bytes(mp3_bytes, "spotify_dj.mp3".to_string());
+
+    let message = poise::CreateReply::default()
+        .content(format!(
             "Sending the following SSML: ```xml
 {formatted_prompt}
 ```"
         ))
-        .attachment(serenity::AttachmentType::Bytes {
-            data: owned_contents,
-            filename: "spotify_dj.mp3".to_string(),
-        })
-        .reply(true)
-    })
-    .await?;
+        .attachment(mp3_attachment)
+        .reply(true);
+
+    ctx.send(message).await?;
 
     Ok(())
 }
@@ -108,16 +106,21 @@ async fn main() {
             commands: vec![spotifydj()],
             ..Default::default()
         })
-        .token(discord_token)
-        .intents(serenity::GatewayIntents::non_privileged())
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data { session })
             })
-        });
+        })
+        .build();
 
-    framework.run().await.unwrap();
+    let intents =
+        serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
+    let client = serenity::ClientBuilder::new(discord_token, intents)
+        .framework(framework)
+        .await;
+
+    client.unwrap().start().await.unwrap();
 
     println!("Done");
 }
